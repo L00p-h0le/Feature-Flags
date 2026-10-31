@@ -1,0 +1,42 @@
+services:
+  postgres:
+    image: postgres:18.4-alpine
+    environment:
+      POSTGRES_USER: w13
+      POSTGRES_DB: w13
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - w13-postgres:/var/lib/postgresql
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -U w13 -d w13']
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+  app:
+    image: w13-feature-flags:local
+    build: .
+    environment:
+      NODE_ENV: production
+      HOST: 0.0.0.0
+      PORT: 8080
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL with postgres as the hostname}
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set the external HTTPS origin}
+    ports:
+      - '127.0.0.1:8080:8080'
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+  bootstrap:
+    image: w13-feature-flags:local
+    profiles: ['tools']
+    entrypoint: ['node', 'apps/api/dist/cli.js']
+    environment:
+      DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL with postgres as the hostname}
+      ADMIN_SEED_PASSWORD: ${ADMIN_SEED_PASSWORD:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  w13-postgres:

@@ -1,0 +1,34 @@
+{
+  "name": "w13-feature-flags",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "packageManager": "npm@12.0.2",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=11"
+  },
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @w13/evaluator && npm run build --workspace @w13/api && npm run build --workspace @w13/dashboard",
+    "start": "node --env-file-if-exists=.env apps/api/dist/main.js",
+    "db:migrate": "node --env-file-if-exists=.env apps/api/dist/cli.js",
+    "db:seed": "node --env-file-if-exists=.env apps/api/dist/cli.js --seed"
+  },
+  "overrides": {
+    "minimatch": "11.0.3",
+    "@fastify/static": {
+      "glob": "14.0.3"
+    }
+  },
+  "devDependencies": {
+    "typescript": "6.0.3",
+    "@types/node": "24.19.2",
+    "@types/pg": "8.23.1",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0"
+  }
+}

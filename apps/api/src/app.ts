@@ -13,6 +13,7 @@ import {
   parseDraft,
   revisionSchema,
   scopeSchema,
+  StoredDataError,
   targetSchema,
 } from './domain.js';
 import type { Role, Scope } from './domain.js';
@@ -37,6 +38,12 @@ interface Options {
   secureCookies?: boolean;
   staticDirectory?: string;
   logger?: boolean;
+  /**
+   * Number of reverse-proxy hops whose X-Forwarded-For entries are trusted.
+   * Without it, every client behind a proxy shares the proxy's rate-limit bucket.
+   * Only set it when the app is reachable exclusively through those proxies.
+   */
+  trustedProxyHops?: number;
 }
 
 export async function createApp(options: Options) {
@@ -62,6 +69,9 @@ export async function createApp(options: Options) {
         }
       : false,
     genReqId: () => randomUUID(),
+    // Hop-count trust: proxy-addr calls this for each hop, nearest first.
+    trustProxy: (_address: string, hop: number) =>
+      hop < (options.trustedProxyHops ?? 0),
   });
   const store = new FlagStore(pool);
   await app.register(cookie);
@@ -85,52 +95,74 @@ export async function createApp(options: Options) {
     await app.register(staticFiles, { root: options.staticDirectory });
 
   app.setErrorHandler(async (error, request, reply) => {
+    if (error instanceof StoredDataError) {
+      request.log.error(
+        {
+          event: 'stored_data_invalid',
+          flagId: error.flagId,
+          requestId: request.id,
+        },
+        'Stored flag data failed validation',
+      );
+      return reply.code(500).send({
+        error: {
+          code: 'STORED_DATA_INVALID',
+          message:
+            'The stored configuration could not be read. Contact a workspace administrator.',
+          requestId: request.id,
+        },
+      });
+    }
     if (error instanceof ApiError) {
       if (error.code === 'CSRF_REJECTED') {
         try {
-          await pool.query(
-            "INSERT INTO audit_events(action,outcome,metadata) VALUES('request.csrf','denied','{}')",
-          );
+          // Only attributable rejections enter the append-only table; anonymous
+          // ones would let unauthenticated traffic grow it without bound.
+          const actor = await sessionActor(pool, request);
+          if (actor)
+            await pool.query(
+              "INSERT INTO audit_events(actor_id,action,outcome,metadata) VALUES($1,'request.csrf','denied','{}')",
+              [actor.id],
+            );
+          else
+            request.log.warn(
+              { event: 'csrf_rejected', requestId: request.id },
+              'Unauthenticated cross-site request rejected',
+            );
         } catch {
           request.log.error(
             { event: 'security_audit_failed' },
             'Security audit unavailable',
           );
-          return reply
-            .code(503)
-            .send({
-              error: {
-                code: 'SERVICE_UNAVAILABLE',
-                message: 'The service is unavailable. Retry shortly.',
-                requestId: request.id,
-              },
-            });
+          return reply.code(503).send({
+            error: {
+              code: 'SERVICE_UNAVAILABLE',
+              message: 'The service is unavailable. Retry shortly.',
+              requestId: request.id,
+            },
+          });
         }
       }
-      return reply
-        .code(error.status)
-        .send({
-          error: {
-            code: error.code,
-            message: error.message,
-            requestId: request.id,
-          },
-        });
+      return reply.code(error.status).send({
+        error: {
+          code: error.code,
+          message: error.message,
+          requestId: request.id,
+        },
+      });
     }
     if (error instanceof z.ZodError)
-      return reply
-        .code(400)
-        .send({
-          error: {
-            code: 'VALIDATION_ERROR',
-            message: 'Check the highlighted fields and try again.',
-            fields: error.issues.map((issue) => ({
-              path: issue.path.join('.'),
-              message: issue.message,
-            })),
-            requestId: request.id,
-          },
-        });
+      return reply.code(400).send({
+        error: {
+          code: 'VALIDATION_ERROR',
+          message: 'Check the highlighted fields and try again.',
+          fields: error.issues.map((issue) => ({
+            path: issue.path.join('.'),
+            message: issue.message,
+          })),
+          requestId: request.id,
+        },
+      });
     const code =
       typeof error === 'object' &&
       error !== null &&
@@ -139,31 +171,27 @@ export async function createApp(options: Options) {
         ? error.statusCode
         : 500;
     if (code >= 400 && code < 500)
-      return reply
-        .code(code)
-        .send({
-          error: {
-            code: 'REQUEST_REJECTED',
-            message:
-              code === 413
-                ? 'Configuration exceeds the 256 KiB request limit.'
-                : 'The request could not be accepted.',
-            requestId: request.id,
-          },
-        });
+      return reply.code(code).send({
+        error: {
+          code: 'REQUEST_REJECTED',
+          message:
+            code === 413
+              ? 'Configuration exceeds the 256 KiB request limit.'
+              : 'The request could not be accepted.',
+          requestId: request.id,
+        },
+      });
     request.log.error(
       { event: 'request_failed', requestId: request.id },
       'Request failed',
     );
-    return reply
-      .code(503)
-      .send({
-        error: {
-          code: 'SERVICE_UNAVAILABLE',
-          message: 'The service is unavailable. Retry shortly.',
-          requestId: request.id,
-        },
-      });
+    return reply.code(503).send({
+      error: {
+        code: 'SERVICE_UNAVAILABLE',
+        message: 'The service is unavailable. Retry shortly.',
+        requestId: request.id,
+      },
+    });
   });
 
   app.addHook('onRequest', async (request, reply) => {
@@ -174,15 +202,13 @@ export async function createApp(options: Options) {
     }
   });
   app.setNotFoundHandler((request, reply) =>
-    reply
-      .code(404)
-      .send({
-        error: {
-          code: 'NOT_FOUND',
-          message: 'Resource not found.',
-          requestId: request.id,
-        },
-      }),
+    reply.code(404).send({
+      error: {
+        code: 'NOT_FOUND',
+        message: 'Resource not found.',
+        requestId: request.id,
+      },
+    }),
   );
 
   const membership = async (
@@ -211,7 +237,7 @@ export async function createApp(options: Options) {
     const memberships = actor
       ? (
           await pool.query(
-            'SELECT m.organization_id AS "organizationId",o.name AS "organizationName",m.environment_key AS "environmentKey",m.role FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE user_id=$1 ORDER BY environment_key',
+            'SELECT m.organization_id AS "organizationId",o.name AS "organizationName",m.environment_key AS "environmentKey",m.role FROM memberships m JOIN organizations o ON o.id=m.organization_id WHERE user_id=$1 ORDER BY o.name,m.organization_id,environment_key',
             [actor.id],
           )
         ).rows

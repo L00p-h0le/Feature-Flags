@@ -48,8 +48,17 @@ export async function sessionActor(
   return result.rows[0] ?? null;
 }
 
+/** Bounds the cleanup work any single login can trigger. */
+const SESSION_PRUNE_BATCH = 1000;
+
 export async function newSession(pool: Pool, userId: string): Promise<string> {
   const token = randomBytes(32).toString('hex');
+  // Expired rows are never read again; prune them so abandoned sessions
+  // (tabs closed without logout) do not accumulate forever.
+  await pool.query(
+    'DELETE FROM sessions WHERE token_hash IN (SELECT token_hash FROM sessions WHERE expires_at<=now() LIMIT $1)',
+    [SESSION_PRUNE_BATCH],
+  );
   await pool.query(
     "INSERT INTO sessions(token_hash,user_id,expires_at) VALUES($1,$2,now()+interval '8 hours')",
     [digest(token), userId],
@@ -63,8 +72,15 @@ export async function requireActor(
 ): Promise<Actor> {
   const actor = await sessionActor(pool, request);
   if (!actor) {
-    await pool.query(
-      "INSERT INTO audit_events(action,outcome) VALUES('session.required','denied')",
+    // Anonymous traffic must not grow the append-only audit table without
+    // bound; it has no actor or scope to attribute, so the request log suffices.
+    request.log.warn(
+      {
+        event: 'session_required',
+        requestId: request.id,
+        route: request.routeOptions.url,
+      },
+      'Unauthenticated request denied',
     );
     throw new ApiError(401, 'UNAUTHENTICATED', 'Sign in to continue.');
   }

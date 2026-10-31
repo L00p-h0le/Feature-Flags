@@ -22,6 +22,8 @@ services:
       PORT: 8080
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL with postgres as the hostname}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:?Set the external HTTPS origin}
+      # The port is bound to loopback, so only the host's HTTPS proxy reaches it.
+      TRUSTED_PROXY_HOPS: ${TRUSTED_PROXY_HOPS:-1}
     ports:
       - '127.0.0.1:8080:8080'
     depends_on:
@@ -35,6 +37,7 @@ services:
     environment:
       DATABASE_URL: ${DATABASE_URL:?Set DATABASE_URL with postgres as the hostname}
       ADMIN_SEED_PASSWORD: ${ADMIN_SEED_PASSWORD:-}
+      AUDIT_RETENTION_DAYS: ${AUDIT_RETENTION_DAYS:-}
     depends_on:
       postgres:
         condition: service_healthy

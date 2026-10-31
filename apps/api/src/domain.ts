@@ -48,6 +48,19 @@ export class ApiError extends Error {
   }
 }
 
+/**
+ * Server-side data failed re-validation on read. Rows are validated on write,
+ * so this is an invariant violation (500, logged), never a client error (400).
+ */
+export class StoredDataError extends Error {
+  constructor(
+    public flagId: string,
+    options: { cause: unknown },
+  ) {
+    super('Stored flag data failed validation', options);
+  }
+}
+
 export const keySchema = z
   .string()
   .min(1)

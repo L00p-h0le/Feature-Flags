@@ -9,6 +9,7 @@ import {
   draftFromSnapshot,
   parseDraft,
   snapshot,
+  StoredDataError,
 } from './domain.js';
 import type { Actor, DraftConfig, FlagRow, Scope } from './domain.js';
 
@@ -16,6 +17,23 @@ const selection = `SELECT f.*, d.config, v.config AS active_config FROM flags f
  JOIN flag_drafts d ON d.flag_id=f.id
  LEFT JOIN flag_versions v ON v.flag_id=f.id AND v.version=f.active_version`;
 const target = 'f.organization_id=$1 AND f.environment_key=$2 AND f.key=$3';
+
+/** Stored rows were validated on write; a parse failure now is a server fault. */
+function stored<T>(flagId: string, parse: () => T): T {
+  try {
+    return parse();
+  } catch (cause) {
+    throw new StoredDataError(flagId, { cause });
+  }
+}
+const storedDraft = (flag: FlagRow) =>
+  stored(flag.id, () => parseDraft(flag.config));
+const storedSnapshot = (flag: FlagRow) =>
+  stored(flag.id, () => snapshot(flag, flag.config));
+const storedActive = (flag: FlagRow) =>
+  flag.active_config === null
+    ? null
+    : stored(flag.id, () => parsePublishedFlag(flag.active_config));
 
 async function audit(
   client: PoolClient,
@@ -52,11 +70,8 @@ export class FlagStore {
         'FLAG_NOT_FOUND',
         'Flag not found in this environment.',
       );
-    const draft = parseDraft(flag.config);
-    const active =
-      flag.active_config === null
-        ? null
-        : parsePublishedFlag(flag.active_config);
+    const draft = storedDraft(flag);
+    const active = storedActive(flag);
     return {
       id: flag.id,
       key: flag.key,
@@ -79,10 +94,7 @@ export class FlagStore {
       [scope.organizationId, scope.environmentKey],
     );
     return result.rows.map((flag) => {
-      const active =
-        flag.active_config === null
-          ? null
-          : parsePublishedFlag(flag.active_config);
+      const active = storedActive(flag);
       return {
         key: flag.key,
         name: flag.name,
@@ -92,7 +104,7 @@ export class FlagStore {
         activeVersion: flag.active_version,
         hasChanges:
           active === null ||
-          !configsEqual(parseDraft(flag.config), draftFromSnapshot(active)),
+          !configsEqual(storedDraft(flag), draftFromSnapshot(active)),
         rolloutBps: active?.rollout?.percentageBps ?? null,
         killed: active?.killSwitch ?? false,
       };
@@ -226,9 +238,7 @@ export class FlagStore {
         await audit(client, actor, flag, 'draft.saved', {
           revision: revision + 1,
           changedFields: [
-            ...changes(parseDraft(flag.config), config).map(
-              (change) => change.field,
-            ),
+            ...changes(storedDraft(flag), config).map((change) => change.field),
             ...(flag.name === input.name ? [] : ['name']),
             ...(flag.description === input.description ? [] : ['description']),
           ],
@@ -245,11 +255,9 @@ export class FlagStore {
       revision,
       'flag.published',
       async (client, flag) => {
-        const config = snapshot(flag, flag.config);
-        if (
-          flag.active_config !== null &&
-          configsEqual(config, parsePublishedFlag(flag.active_config))
-        )
+        const config = storedSnapshot(flag);
+        const active = storedActive(flag);
+        if (active !== null && configsEqual(config, active))
           throw new ApiError(
             409,
             'NO_CHANGES',
@@ -297,7 +305,7 @@ export class FlagStore {
             'VERSION_NOT_FOUND',
             'Published version not found for this flag.',
           );
-        parsePublishedFlag(historical.config);
+        stored(flag.id, () => parsePublishedFlag(historical.config));
         if (flag.active_version === version)
           throw new ApiError(
             409,
@@ -377,19 +385,12 @@ export class FlagStore {
         'Restore this flag before simulating.',
       );
     const context = subjectKey === undefined ? {} : { subjectKey };
+    const active = storedActive(flag);
     return {
       revision: flag.revision,
-      draft: evaluate(snapshot(flag, flag.config), context),
-      active:
-        flag.active_config === null
-          ? null
-          : evaluate(parsePublishedFlag(flag.active_config), context),
-      changes: changes(
-        flag.active_config === null
-          ? null
-          : parsePublishedFlag(flag.active_config),
-        parseDraft(flag.config),
-      ),
+      draft: evaluate(storedSnapshot(flag), context),
+      active: active === null ? null : evaluate(active, context),
+      changes: changes(active, storedDraft(flag)),
     };
   }
 

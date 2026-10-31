@@ -169,7 +169,14 @@ export async function request<T>(
       'Cannot reach the service. Your local edits are still here. Retry when the connection returns.',
     );
   }
-  const body: unknown = await response.json();
+  let body: unknown = null;
+  try {
+    body = await response.json();
+  } catch (error) {
+    if (options.signal?.aborted) throw error;
+    // Non-JSON bodies (a proxy's HTML 502 page, a timed-out read) still need
+    // a RequestError carrying the status so callers can handle 401/409.
+  }
   if (!response.ok) {
     const parsed = errorSchema.safeParse(body);
     const message = parsed.success

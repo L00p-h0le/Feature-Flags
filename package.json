@@ -16,7 +16,8 @@
     "build": "npm run build --workspace @w13/evaluator && npm run build --workspace @w13/api && npm run build --workspace @w13/dashboard",
     "start": "node --env-file-if-exists=.env apps/api/dist/main.js",
     "db:migrate": "node --env-file-if-exists=.env apps/api/dist/cli.js",
-    "db:seed": "node --env-file-if-exists=.env apps/api/dist/cli.js --seed"
+    "db:seed": "node --env-file-if-exists=.env apps/api/dist/cli.js --seed",
+    "db:prune-audit": "node --env-file-if-exists=.env apps/api/dist/cli.js --prune-audit"
   },
   "overrides": {
     "minimatch": "11.0.3",

@@ -379,7 +379,11 @@ details {
 }
 .environment-control select {
   font-size: 0.8rem;
-  width: 150px;
+  /* Fit "Organization / environment" labels; cap so narrow screens never scroll. */
+  width: auto;
+  min-width: 150px;
+  max-width: min(22rem, 45vw);
+  text-overflow: ellipsis;
   padding: 0.4rem 0.7rem;
   border-color: var(--line);
   font-weight: 550;

@@ -36,14 +36,23 @@ type Confirmation =
   | { kind: 'rollback'; version: number }
   | { kind: 'archive'; archived: boolean };
 
+const scopeOf = (entry: Session['memberships'][number]) =>
+  `${entry.organizationId}/${entry.environmentKey}`;
+const scopeLabel = (entry: Session['memberships'][number]) =>
+  `${entry.organizationName} / ${entry.environmentKey}`;
+
 export function App() {
   const [session, setSession] = useState<Session | null>(null);
-  const [environment, setEnvironment] = useState('development');
+  // Organization + environment: an environment key alone is ambiguous when a
+  // user belongs to several organizations. Empty selects the first membership.
+  const [scopeKey, setScopeKey] = useState('');
   const [page, setPage] = useState<'flags' | 'audit'>('flags');
   const [view, setView] = useState<'targeting' | 'versions' | 'audit'>(
     'targeting',
   );
   const [flags, setFlags] = useState<FlagSummary[] | null>(null);
+  // The base URL `flags` was loaded from; guards detail loads during a switch.
+  const [listBase, setListBase] = useState('');
   const [selected, setSelected] = useState('');
   const [flag, setFlag] = useState<Flag | null>(null);
   const [draft, setDraft] = useState<Draft | null>(null);
@@ -62,12 +71,17 @@ export function App() {
   const [preview, setPreview] = useState<Preview | null>(null);
 
   const membership =
-    session?.memberships.find(
-      (entry) => entry.environmentKey === environment,
-    ) ?? session?.memberships[0];
+    session?.memberships.find((entry) => scopeOf(entry) === scopeKey) ??
+    session?.memberships[0];
+  const multipleOrganizations =
+    new Set(session?.memberships.map((entry) => entry.organizationId)).size > 1;
   const base = membership
     ? `/api/organizations/${membership.organizationId}/environments/${membership.environmentKey}`
     : '';
+  // Only fetch details for a key known to exist in the list for this base,
+  // so a switch never requests the previous scope's key from the new one.
+  const selectedListed =
+    listBase === base && (flags ?? []).some((item) => item.key === selected);
   const canEdit = membership?.role === 'admin' || membership?.role === 'editor';
   const isAdmin = membership?.role === 'admin';
   const dirty =
@@ -98,6 +112,7 @@ export function App() {
         signal ? { signal } : {},
       );
       setFlags(result.flags);
+      setListBase(base);
       setSelected((current) =>
         result.flags.some((item) => item.key === current)
           ? current
@@ -133,7 +148,7 @@ export function App() {
 
   const loadDetail = useCallback(
     async (signal?: AbortSignal) => {
-      if (!base || !selected || !session?.user) return;
+      if (!base || !selectedListed || !session?.user) return;
       const next = await request(
         `${base}/flags/${encodeURIComponent(selected)}`,
         flagSchema,
@@ -141,7 +156,7 @@ export function App() {
       );
       installFlag(next);
     },
-    [base, selected, session?.user],
+    [base, selected, selectedListed, session?.user],
   );
   useEffect(() => {
     const controller = new AbortController();
@@ -441,11 +456,16 @@ export function App() {
             <label>
               Environment
               <select
-                value={membership?.environmentKey ?? ''}
+                value={membership ? scopeOf(membership) : ''}
+                title={membership ? scopeLabel(membership) : undefined}
                 disabled={busy}
                 onChange={(event) => {
+                  // Clearing the selection without a scope change would never
+                  // reload the list, leaving the detail panel empty.
+                  if (membership && event.target.value === scopeOf(membership))
+                    return;
                   if (allowDiscard()) {
-                    setEnvironment(event.target.value);
+                    setScopeKey(event.target.value);
                     setSelected('');
                     setView('targeting');
                     setSuccess('');
@@ -453,11 +473,10 @@ export function App() {
                 }}
               >
                 {session.memberships.map((entry) => (
-                  <option
-                    key={`${entry.organizationId}-${entry.environmentKey}`}
-                    value={entry.environmentKey}
-                  >
-                    {entry.environmentKey}
+                  <option key={scopeOf(entry)} value={scopeOf(entry)}>
+                    {multipleOrganizations
+                      ? scopeLabel(entry)
+                      : entry.environmentKey}
                   </option>
                 ))}
               </select>

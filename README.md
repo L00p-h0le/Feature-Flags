@@ -35,6 +35,10 @@ Seed creates a synthetic Northstar Studio workspace and the admin email ava@exam
 
 For an existing populated database, run bootstrap without --seed instead. Never delete the database volume as part of a redeploy. Use separate migration and least-privilege runtime database credentials where your platform supports them.
 
+Rate limits key on the client IP. The Compose file sets TRUSTED_PROXY_HOPS=1 so the client address is taken from your HTTPS proxy's X-Forwarded-For; that is safe only because the app port is bound to 127.0.0.1. Use the number of proxies in front of the app, or 0 if clients connect directly.
+
+Audit events are append-only except for retention. Run `docker compose -f compose.deploy.yaml run --rm bootstrap --prune-audit` (or `npm run db:prune-audit`) with migration credentials to delete events older than AUDIT_RETENTION_DAYS (default 365). The database refuses to delete anything younger than 90 days. Nothing schedules this for you.
+
 ## Without Docker
 
 ~~~sh
@@ -42,6 +46,7 @@ npm ci --include=dev --ignore-scripts
 npm run build
 npm run db:migrate
 npm run db:seed
+npm run db:prune-audit   # optional, any time later
 npm prune --omit=dev --ignore-scripts
 npm start
 ~~~

@@ -2,7 +2,13 @@ import { randomBytes } from 'node:crypto';
 import type { Pool } from 'pg';
 import { passwordHash } from './auth.js';
 import { FlagStore } from './store.js';
-import type { Actor } from './domain.js';
+import { configsEqual } from './domain.js';
+import type { Actor, DraftConfig } from './domain.js';
+
+/** Flag revisions after each seed step: create, save seed rules, publish v1. */
+const CREATED_REVISION = 1;
+const SAVED_REVISION = 2;
+const PUBLISHED_REVISION = 3;
 
 export const DEMO_ORGANIZATION = '13000000-0000-4000-8000-000000000001';
 export const DEMO_USERS = [
@@ -82,6 +88,10 @@ export async function seed(pool: Pool, adminPassword?: string): Promise<void> {
       bps: 10_000,
     },
   ];
+  // Each store call commits on its own, so a run can stop between steps.
+  // Steps are resumable: each runs only while the flag is still at the exact
+  // revision the previous seed step leaves, so a rerun finishes an interrupted
+  // seed but never overwrites a change someone made afterwards.
   for (const environmentKey of ['development', 'production']) {
     const scope = { organizationId: DEMO_ORGANIZATION, environmentKey };
     for (const example of examples) {
@@ -89,9 +99,10 @@ export async function seed(pool: Pool, adminPassword?: string): Promise<void> {
         'SELECT id FROM flags WHERE organization_id=$1 AND environment_key=$2 AND key=$3',
         [DEMO_ORGANIZATION, environmentKey, example.key],
       );
-      if (exists.rows.length) continue;
-      const created = await store.create(scope, actor, example);
-      const config = {
+      let flag = exists.rows.length
+        ? await store.get(scope, example.key)
+        : await store.create(scope, actor, example);
+      const config: DraftConfig = {
         killSwitch: false,
         defaultValue: false,
         exactRules:
@@ -108,29 +119,28 @@ export async function seed(pool: Pool, adminPassword?: string): Promise<void> {
           percentageBps: environmentKey === 'production' ? 0 : example.bps,
         },
       };
-      const saved = await store.save(
-        scope,
-        example.key,
-        actor,
-        created.revision,
-        { name: example.name, description: example.description, config },
-      );
-      const published = await store.publish(
-        scope,
-        example.key,
-        actor,
-        saved.revision,
-      );
+      const details = { name: example.name, description: example.description };
+      if (flag.activeVersion === null && flag.revision === CREATED_REVISION)
+        flag = await store.save(scope, example.key, actor, flag.revision, {
+          ...details,
+          config,
+        });
+      if (
+        flag.activeVersion === null &&
+        flag.revision === SAVED_REVISION &&
+        configsEqual(flag.draft, config)
+      )
+        flag = await store.publish(scope, example.key, actor, flag.revision);
       if (
         environmentKey === 'development' &&
-        example.key === 'checkout-redesign'
-      ) {
-        await store.save(scope, example.key, actor, published.revision, {
-          name: example.name,
-          description: example.description,
+        example.key === 'checkout-redesign' &&
+        flag.activeVersion === 1 &&
+        flag.revision === PUBLISHED_REVISION
+      )
+        await store.save(scope, example.key, actor, flag.revision, {
+          ...details,
           config: { ...config, rollout: { percentageBps: 2500 } },
         });
-      }
     }
   }
 }
